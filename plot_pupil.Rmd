@@ -1,0 +1,69 @@
+---
+title: "Plot Pupillary Responses"
+output: html_notebook
+---
+
+## Information
+This script was developed by Jacie R. McHaney and was last updated 5/26/23. After running `process_pupil.Rmd`, you will use this script to plot your pupillary responses. This script is set up for plotting QuickSIN pupil data and will need to be modified to be specific to the design of your experiment.
+
+
+### Load Libraries
+
+```{r}
+rm(list = ls())
+
+library(tidyverse)
+library(ggplot2)
+library(rstatix)
+library(tictoc)
+```
+
+### Prepare the parameters
+```{r}
+#read in data
+lastExp <- '2023-05-26' #should match export date from process_pupil.Rmd
+maindir <- getwd()
+inpath <- paste(maindir,'/processed_pup_data',sep = '')
+figpath <- paste(maindir,'/figures',sep='')
+if(file.exists(figpath)==FALSE){
+  dir.create(figpath)
+}
+data <- read.csv(paste(inpath, '/processed_data_',lastExp,'.csv', sep = ''))
+
+#parameters
+nsubs <- length(unique(data$subj))
+timevec <- seq(-980,7300,20)
+#sp1:sp50 == -980ms to 0 ms
+```
+
+
+### Prepare for plotting
+```{r}
+# calculate average pupil per sub and snr ---------------------------------
+tic()
+subdat<- data %>% 
+  group_by(subj,Time) %>% 
+  get_summary_stats(Pupil,type = 'mean') %>% 
+  select(-c(variable,n)) %>% 
+  rename(Pupil = mean)
+toc()
+
+```
+
+### Plot the data
+```{r}
+#plot
+p <- ggplot(subdat, aes(x = Time, y = Pupil))
+p <- p + stat_summary(fun.data = mean_se, geom = 'smooth', se = TRUE, linetype = 'solid', alpha = .25,  linewidth = 2)
+p <- p + theme_bw()
+p <- p + theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+               panel.grid.minor = element_blank(), axis.line = element_line(colour = 'black'),
+               axis.text = element_text(size = 14),
+               axis.title = element_text(face = 'bold', size = 18),
+               legend.text = element_text(size = 14),
+               legend.background = element_blank())
+p <- p + xlab('Time from Sound Onset (ms)') + ylab('Baseline Normalized \nChange in Pupil')
+print(p)
+
+```
+

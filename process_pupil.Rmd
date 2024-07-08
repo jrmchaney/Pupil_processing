@@ -1,0 +1,159 @@
+---
+title: "Process Pupillometry Data"
+output: html_notebook
+---
+
+## Information
+This script was developed by Jacie R. McHaney and was last updated 5/26/23
+This script processes data that has been exported from SR Research's DataViewer Software.
+Data must be in a .txt format from DataViewer with the following columns:
+`IP_INDEX
+IP_LABEL
+RECORDING_SESSION_LABEL
+TRIAL_INDEX
+EYE_TRACKED
+IP_DURATION
+LEFT_IN_BLINK
+LEFT_IN_SACCADE
+LEFT_PUPIL_SIZE`
+
+
+### Load libraries and clear variables
+```{r}
+rm(list = ls())
+
+library(tidyverse)
+library(rstatix)
+library(naniar)
+library(zoo)
+```
+
+### Set up processing pathways and parameters
+It is very important to set the parameters in this section to be specific to your dataset and research question.
+```{r}
+#location of exported txt files
+inpath <- getwd()
+
+#eyelink exported data file
+file <- read.table(paste(inpath, '/pupil_sample_quicksin.txt', sep = ''), header = TRUE, sep = '\t')
+
+### parameters
+today <- Sys.Date()
+
+outpath <- paste(inpath, '/processed_pup_data', sep = '')
+if(file.exists(outpath)==FALSE){
+  dir.create(outpath)
+}
+outname <- paste('processed_data_', today, '.csv', sep = '')
+
+fs <- 50; #sampling rate of the exported data
+spoint <- 1000/fs
+pre.pad <- 60 #how much to pad before blinks in ms
+post.pad  <- 160 #after blink pad in ms
+sacc.pad <- 60 #how much to interp on either side of saccade in ms
+baseline <- 1000 #how long of a baseline period do you want in ms
+
+#attach functions
+source(paste(inpath,'/blink_interp_dv.R', sep = '')) #where are the scripts and function scripts located
+source(paste(inpath,'/sacc_interp_dv.R', sep = '')) #where are the scripts and function scripts located
+```
+
+## Prepare the data for analysis
+```{r}
+#make sure all data was left-eye tracked (or right)
+unique(file$EYE_TRACKED)
+
+trim <- file %>% 
+  select(-c(EYE_TRACKED,IP_INDEX,IP_LABEL)) %>% #remove unnecessary columns
+  separate(RECORDING_SESSION_LABEL, into = c('subj',NA), sep = '_') %>% #create subject column
+  rename(runTrial = TRIAL_INDEX,
+         pupil = LEFT_PUPIL_SIZE,
+         blink = LEFT_IN_BLINK,
+         saccade = LEFT_IN_SACCADE) %>% 
+  mutate(subj = as.factor(subj))
+
+#2. find lower bound of samples for trials and create time vec
+nsamps <- min(trim$IP_DURATION) #in ms
+spTrial <- round((nsamps/1000)*fs)
+maxtime <- (spTrial*20)-1000 #in ms
+tvec <- seq(-980,maxtime,spoint) #this creates the time vector based on your sampling rate and length of trial
+```
+
+## Reject "bad" pupil trials
+These can be from a number of things, (e.g., too many blinks, lost tracking, etc)
+Here, the rejection threshold for blinks is 15% of the trial detected as a blink, which is based on prior literature.
+```{r}
+#1. trim so each trial is same length
+data.now <- trim %>% 
+  select(-IP_DURATION) %>% 
+  group_by(subj,runTrial) %>% 
+  slice_head(n = spTrial)
+
+data.now %>% group_by(subj,runTrial) %>% count() #this just confirms that it worked and that all trials are the same
+
+#2. label bad trials defined as >15% of the samples were detected as a blink.
+bad.trials <- data.now %>% 
+  group_by(subj,runTrial) %>% 
+  transmute(percBlink = sum(blink)/spTrial) %>% 
+  distinct() %>% 
+  subset(percBlink > .15)
+
+#3. need to now exclude these bad trials.  
+data.good <- data.now %>% 
+  anti_join(bad.trials, by = c('subj','runTrial')) %>% 
+  group_by(subj,runTrial) %>% 
+  mutate(Time = tvec,
+         sp = seq(1,spTrial))
+```
+
+## Linearly Interpolate blinks with custom function
+```{r}
+
+blink.dat <- blink_interp_dv(data.good,spoint,fs, pre.pad, post.pad)
+
+```
+
+## Now linearly interpolate saccades
+```{r}
+
+fixed.dat <- sacc_interp_dv(blink.dat, spoint, fs, sacc.pad, spTrial)
+
+```
+
+### Confirm that interpolation worked using a single subject
+You must change the subject number here to reflect one of your subject's
+```{r}
+#check a single trial
+test <- subset(fixed.dat, subj == '1001' & runTrial == 1)
+plot(test$Pupil, type = 'l')
+```
+
+## Baseline normalize your data
+This takes the mean pupil response of your baseline period and normalizes the pupil response on a trial by trial basis to the mean of the baseline.
+```{r}
+
+bsl.corr <- fixed.dat %>% 
+  mutate(Event = as.factor(case_when(Time < 0 ~ 'Baseline',
+                           TRUE ~ 'Stim'))) %>% 
+  subset(Event == 'Baseline') %>% 
+  select(subj,runTrial,Pupil) %>% 
+  group_by(subj,runTrial) %>% 
+  get_summary_stats(Pupil, type = 'mean') %>% 
+  rename(Basemean = mean) %>% 
+  select(-c(variable,n)) %>% 
+  left_join(fixed.dat, by = c('subj','runTrial')) %>% 
+  mutate(Pupil_corr = (Pupil - Basemean)/Basemean)
+
+```
+
+# Save your data
+```{r}
+
+#prep and save
+final <- bsl.corr %>% 
+  select(-c(Pupil,Basemean)) %>% 
+  rename(Pupil=Pupil_corr)
+
+write.csv(final, paste(outpath, '/', outname, sep = ''), row.names = FALSE)
+
+```
